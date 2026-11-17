@@ -1,0 +1,79 @@
+name: Release Patched Compose Native
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish'
+        required: true
+        default: '1.13.0-beta01'
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Build Linux x64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: corretto
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Install Linux native dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential libdbus-1-dev libfontconfig1-dev libfreetype-dev \
+            libgl-dev libpng-dev libwayland-dev libx11-dev pkg-config zlib1g-dev
+          sdl_archive="$RUNNER_TEMP/SDL3-3.4.10.tar.gz"
+          curl --fail --location --silent --show-error \
+            --output "$sdl_archive" \
+            https://github.com/libsdl-org/SDL/releases/download/release-3.4.10/SDL3-3.4.10.tar.gz
+          tar --extract --gzip --file "$sdl_archive" --directory "$RUNNER_TEMP"
+          sudo cp --recursive "$RUNNER_TEMP/SDL3-3.4.10/include/SDL3" /usr/include/
+          dbus_arch_include="$(pkg-config --variable=libdir dbus-1)/dbus-1.0/include"
+          sudo mkdir --parents /usr/lib/dbus-1.0
+          if [[ ! -e /usr/lib/dbus-1.0/include ]]; then
+            sudo ln --symbolic "$dbus_arch_include" /usr/lib/dbus-1.0/include
+          fi
+
+      - name: Build and publish to Maven repository
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version || '1.13.0-beta01' }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/maven-repo"
+          export MAVEN_LOCAL_REPOSITORY="$GITHUB_WORKSPACE/maven-repo"
+          bash scripts/publish-linux-native-to-maven-local.sh "$RELEASE_VERSION"
+
+      - name: Archive Maven Repository
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/maven-repo"
+          tar -czf "$GITHUB_WORKSPACE/compose-native-linux-x64-maven.tar.gz" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: compose-native-linux-x64-maven
+          path: compose-native-linux-x64-maven.tar.gz
+
+      - name: Create or Update GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: v1.13.0-beta01-patched
+        run: |
+          gh release view "$TAG_NAME" || gh release create "$TAG_NAME" \
+            --title "Compose Native 1.13.0-beta01 Patched (Wayland unconstrained sizing)" \
+            --notes "Patched build of Compose Native desktop-native supporting unconstrained window sizing on Wayland."
+          gh release upload "$TAG_NAME" compose-native-linux-x64-maven.tar.gz --clobber
